@@ -288,6 +288,7 @@ impl Toipe {
         }
         let (_, sizey) = terminal_size()?;
         self.tui.write_row(sizey - 1, &s)?;
+        self.tui.move_to_cur_pos()?;
         Ok(())
     }
 

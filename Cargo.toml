@@ -1,0 +1,31 @@
+[package]
+name = "toipe"
+description = "A trusty terminal typing tester."
+repository = "https://github.com/Samyak2/toipe"
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["typing-test", "typing", "wpm"]
+
+version = "0.5.0"
+
+edition = "2021"
+
+license = "MIT"
+
+default-run = "toipe"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.release]
+strip = "debuginfo"
+
+[lib]
+
+[dependencies]
+anyhow = "1.0"
+bisection = "0.1.0"
+clap = { version = "3.0.5", features = ["derive", "color", "suggestions"] }
+rand = "0.8.4"
+termion = "1.5.6"
+include-flate = {version ="0.1.4", features=["stable"]}
+approx = "0.5.1"

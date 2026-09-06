@@ -20,7 +20,7 @@ A trusty terminal typing tester.
 
 ### From GitHub Releases
 
-Go to the [latest release](https://github.com/doriangironde/toipe/releases/latest) and download the archive for your platform (`toipe-linux-x86_64.tar.gz` for Linux, `toipe-macos-arm64.zip` or `toipe-macos-x86_64.zip` for Mac). Extract it and run the `toipe` binary inside.
+Go to the [latest release](https://github.com/doriangironde/toipe/releases/latest) and download the archive for your platform (`toipe-linux-x86_64.tar.gz` for Linux, `toipe-macos-arm64.zip` for Mac). Extract it and run the `toipe` binary inside.
 
 ### From source
 

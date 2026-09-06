@@ -13,8 +13,6 @@ jobs:
             artifact: toipe-linux-x86_64
           - os: macos-latest
             artifact: toipe-macos-arm64
-          - os: macos-13
-            artifact: toipe-macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

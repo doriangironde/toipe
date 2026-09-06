@@ -275,19 +275,18 @@ impl Toipe {
         } else {
             1.0
         };
-        let mut s = format!(
-            "{:.0} wpm  {:.0}%  {}/{}",
-            wpm,
-            acc * 100.0,
-            typed,
-            flat.len()
-        );
+        let mut pieces = vec![
+            Text::from(format!("{:.0}", wpm)).with_color(color::Green),
+            Text::from(" wpm  ").with_faint(),
+            Text::from(format!("{:.0}%", acc * 100.0)).with_color(color::Blue),
+            Text::from(format!("  {}/{}", typed, flat.len())).with_faint(),
+        ];
         if let Some(limit) = self.config.time {
             let left = limit.saturating_sub(started_at.elapsed().as_secs());
-            s.push_str(&format!("  {}s left", left));
+            pieces.push(Text::from(format!("  {}s left", left)).with_faint());
         }
         let (_, sizey) = terminal_size()?;
-        self.tui.write_row(sizey - 1, &s)?;
+        self.tui.display_row(sizey - 1, &pieces)?;
         self.tui.move_to_cur_pos()?;
         Ok(())
     }

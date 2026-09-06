@@ -461,14 +461,16 @@ impl ToipeTui {
         Ok(lines)
     }
 
-    pub fn write_row(&mut self, y: u16, text: &str) -> MaybeError {
+    pub fn display_row(&mut self, y: u16, text: &[Text]) -> MaybeError {
+        let (sizex, _) = terminal_size()?;
         write!(
             self.stdout,
             "{}{}{}",
             cursor::Goto(1, y),
             clear::CurrentLine,
-            text
+            cursor::Goto(sizex / 2, y)
         )?;
+        self.display_a_line_raw(text)?;
         self.flush()?;
         Ok(())
     }

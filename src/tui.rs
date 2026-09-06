@@ -157,7 +157,6 @@ struct LinePos {
     pub length: u16,
 }
 
-/// Tracks the cursor position within the lines of the typing text.
 struct CursorPos {
     pub lines: Vec<LinePos>,
     pub cur_line: usize,
@@ -281,9 +280,6 @@ impl ToipeTui {
     }
 
     /// Same as [`display_a_line`] but without the flush.
-    ///
-    /// When `track` is set, the position of the line is recorded so the
-    /// cursor can later move through it character by character.
     fn display_a_line_raw<T, U>(&mut self, text: U, track: bool) -> MaybeError
     where
         U: AsRef<[T]>,
@@ -314,10 +310,6 @@ impl ToipeTui {
     /// - The lines are centered vertically and each line itself is
     ///   centered horizontally.
     // Ref for this generic thingy: https://stackoverflow.com/a/50056925/11199009
-    //
-    // The bounds allow any slice whose elements are themselves slices
-    // (or arrays) of printable text, e.g. `Vec<[Text; 1]>` or `&[&[Text]]`.
-    // See [`display_a_line_raw`] for what `track` does.
     pub fn display_lines<T, U>(&mut self, lines: &[T], track: bool) -> MaybeError
     where
         T: AsRef<[U]>,
@@ -368,12 +360,6 @@ impl ToipeTui {
         Ok(())
     }
 
-    /// Lays out the given words into centered lines and displays them.
-    ///
-    /// Records each line's position so the cursor can move through the
-    /// text character by character, then places the cursor on the first
-    /// character. Returns the rendered lines (with a trailing space on
-    /// each line except the last).
     pub fn display_words(&mut self, words: &[String]) -> MaybeError<Vec<Text>> {
         self.reset();
         let mut current_len = 0;
@@ -466,11 +452,6 @@ impl ToipeTui {
         Ok(())
     }
 
-    /// Replaces the character just before the cursor with `text`.
-    ///
-    /// NOTE: `text` must contain exactly one character. This cannot be
-    /// enforced at compile time (length is a runtime property), so it is
-    /// checked in debug builds.
     pub fn replace_text(&mut self, text: Text) -> MaybeError {
         debug_assert_eq!(
             text.text().chars().count(),

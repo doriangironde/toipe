@@ -31,9 +31,6 @@ impl ToipeResults {
     }
 
     /// Percentage of letters that were typed correctly.
-    ///
-    /// Clamped at 0.0: the raw fraction can go negative when there were
-    /// more errors than typed characters.
     pub fn accuracy(&self) -> f64 {
         if self.total_chars_typed == 0 {
             return 0.0;
@@ -123,7 +120,7 @@ mod tests {
             0.5,
             max_ulps = max_ulps
         );
-        // more errors than correct - clamped at 0.0
+        // more errors than correct
         assert_ulps_eq!(
             get_toipe_results(100, 150).accuracy(),
             0.0,

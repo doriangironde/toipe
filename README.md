@@ -7,12 +7,6 @@ A trusty terminal typing tester.
 </p>
 
 <p align=center>
-<a href="https://crates.io/crates/toipe"><img alt="Crates.io badge" src="https://img.shields.io/crates/v/toipe"></a>
-<a href="https://github.com/Samyak2/toipe/actions/workflows/lints-and-checks.yml"><img src="https://github.com/Samyak2/toipe/actions/workflows/lints-and-checks.yml/badge.svg" alt="Lints and checks badge" /></a>
-<a href="https://docs.rs/toipe/latest/toipe/"><img alt="docs.rs badge" src="https://img.shields.io/docsrs/toipe"></a>
-</p>
-
-<p align=center>
 <img src=https://raw.githubusercontent.com/Samyak2/toipe/main/images/toipe.gif>
 </p>
 
@@ -20,16 +14,22 @@ A trusty terminal typing tester.
 
 ## Install
 
-### From GitHub
+### From source
 
-Go to the [latest release](https://github.com/Samyak2/toipe/releases/latest), scroll down to "Assets" and download the correct file for your platform (`.zip` in case of Mac OS, `.tar.gz` in case of Linux). Unzip the file and run the `toipe` binary inside.
+Clone this repository and build it with cargo:
+
+```
+git clone https://github.com/doriangironde/toipe && cd toipe
+cargo build --release
+./target/release/toipe
+```
 
 ### From Cargo
 
-Alternatively, if you have the `cargo` tool (part of the Rust toolchain) installed on your system, you can use:
+Alternatively, if you have the `cargo` tool (part of the Rust toolchain) installed on your system, you can install directly from this repository:
 
 ```
-cargo install toipe
+cargo install --git https://github.com/doriangironde/toipe
 ```
 
 ## Run typing test

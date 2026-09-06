@@ -1,0 +1,49 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: toipe-linux-x86_64
+          - os: macos-latest
+            artifact: toipe-macos-arm64
+          - os: macos-13
+            artifact: toipe-macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          cd target/release
+          if [[ "${{ matrix.os }}" == macos* ]]; then
+            zip -q ${{ matrix.artifact }}.zip toipe
+          else
+            tar czf ${{ matrix.artifact }}.tar.gz toipe
+          fi
+          cd ../..
+          mkdir -p dist
+          mv target/release/${{ matrix.artifact }}.* dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

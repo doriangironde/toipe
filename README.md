@@ -7,12 +7,20 @@ A trusty terminal typing tester.
 </p>
 
 <p align=center>
+<a href="https://github.com/doriangironde/toipe/actions/workflows/lints-and-checks.yml"><img src="https://github.com/doriangironde/toipe/actions/workflows/lints-and-checks.yml/badge.svg" alt="Lints and checks badge" /></a>
+</p>
+
+<p align=center>
 <img src=https://raw.githubusercontent.com/Samyak2/toipe/main/images/toipe.gif>
 </p>
 
 # Usage
 
 ## Install
+
+### From GitHub Releases
+
+Go to the [latest release](https://github.com/doriangironde/toipe/releases/latest) and download the archive for your platform (`toipe-linux-x86_64.tar.gz` for Linux, `toipe-macos-arm64.zip` or `toipe-macos-x86_64.zip` for Mac). Extract it and run the `toipe` binary inside.
 
 ### From source
 

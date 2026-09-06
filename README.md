@@ -36,14 +36,14 @@ cargo install --git https://github.com/doriangironde/toipe
 
 toipe looks best on a nice terminal (such as Alacritty) with color and style support.
 
-If installed through GitHub, run the binary (found inside the zip/tar.gz file after extracting) directly:
-```
-./toipe
-```
-
-If installed through `cargo`, use:
+If installed through `cargo`, run:
 ```
 toipe
+```
+
+If built from source, run the built binary directly:
+```
+./target/release/toipe
 ```
 
 ## Keyboard shortcuts
@@ -83,6 +83,22 @@ By default, only lowercase words are shown. To add punctuation and sentence case
 
 ```
 toipe -p
+```
+
+## Timed tests
+
+Run a test of a fixed duration in seconds, with a sliding word window:
+
+```
+toipe -t 60
+```
+
+## Statistics
+
+Every completed test is saved to `~/.local/share/toipe/history`. View your stats (personal best, averages) with:
+
+```
+toipe --stats
 ```
 
 # Platform support

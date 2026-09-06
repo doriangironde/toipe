@@ -8,7 +8,7 @@ use std::{
 use termion::{
     clear,
     color::{self, Color},
-    cursor::{self, DetectCursorPos},
+    cursor,
     raw::{IntoRawMode, RawTerminal},
     style, terminal_size,
 };
@@ -17,6 +17,52 @@ use crate::ToipeError;
 use anyhow::Result;
 
 const MIN_LINE_WIDTH: usize = 50;
+const MAX_WORDS_PER_LINE: usize = 10;
+
+pub fn wrap_words(words: &[String], max_width: u16, max_words_per_line: usize) -> Vec<Vec<String>> {
+    let mut current_len = 0;
+    let mut line: Vec<String> = Vec::new();
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    for word in words {
+        let new_len = current_len + word.len() as u16 + 1;
+        if line.len() < max_words_per_line && new_len <= max_width {
+            line.push(word.clone());
+            current_len = new_len;
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line.push(word.clone());
+            current_len = word.len() as u16 + 1;
+        }
+    }
+    lines.push(line);
+    lines
+}
+
+pub fn take_words_for_lines(
+    words: &[String],
+    max_width: u16,
+    max_words_per_line: usize,
+    max_lines: usize,
+) -> usize {
+    let mut lines = 0;
+    let mut line_words = 0;
+    let mut current_len = 0u16;
+    for (i, word) in words.iter().enumerate() {
+        let new_len = current_len + word.len() as u16 + 1;
+        if line_words < max_words_per_line && new_len <= max_width {
+            line_words += 1;
+            current_len = new_len;
+        } else {
+            lines += 1;
+            if lines >= max_lines {
+                return i;
+            }
+            line_words = 1;
+            current_len = word.len() as u16 + 1;
+        }
+    }
+    words.len()
+}
 
 /// Describes something that has a printable length.
 ///
@@ -273,14 +319,14 @@ impl ToipeTui {
     ///
     /// - The line is centered horizontally.
     pub fn display_a_line(&mut self, text: &[Text]) -> MaybeError {
-        self.display_a_line_raw(text, false)?;
+        self.display_a_line_raw(text)?;
         self.flush()?;
 
         Ok(())
     }
 
     /// Same as [`display_a_line`] but without the flush.
-    fn display_a_line_raw<T, U>(&mut self, text: U, track: bool) -> MaybeError
+    fn display_a_line_raw<T, U>(&mut self, text: U) -> MaybeError
     where
         U: AsRef<[T]>,
         [T]: HasLength,
@@ -288,11 +334,6 @@ impl ToipeTui {
     {
         let len = text.as_ref().length() as u16;
         write!(self.stdout, "{}", cursor::Left(len / 2),)?;
-
-        if track {
-            let (x, y) = self.stdout.cursor_pos()?;
-            self.cursor_pos.lines.push(LinePos { x, y, length: len });
-        }
 
         for t in text.as_ref() {
             self.display_raw_text(t)?;
@@ -321,12 +362,17 @@ impl ToipeTui {
         let line_offset = lines.len() as u16 / 2;
 
         for (line_no, line) in lines.iter().enumerate() {
-            write!(
-                self.stdout,
-                "{}",
-                cursor::Goto(sizex / 2, sizey / 2 + (line_no as u16) - line_offset)
-            )?;
-            self.display_a_line_raw(line.as_ref(), track)?;
+            let y = sizey / 2 + (line_no as u16) - line_offset;
+            write!(self.stdout, "{}", cursor::Goto(sizex / 2, y))?;
+            if track {
+                let len = line.as_ref().length() as u16;
+                self.cursor_pos.lines.push(LinePos {
+                    x: sizex / 2 - len / 2,
+                    y,
+                    length: len,
+                });
+            }
+            self.display_a_line_raw(line.as_ref())?;
         }
         self.flush()?;
 
@@ -353,7 +399,7 @@ impl ToipeTui {
                 "{}",
                 cursor::Goto(sizex / 2, sizey - 1 + (line_no as u16) - line_offset)
             )?;
-            self.display_a_line_raw(line.as_ref(), false)?;
+            self.display_a_line_raw(line.as_ref())?;
         }
         self.flush()?;
 
@@ -362,42 +408,28 @@ impl ToipeTui {
 
     pub fn display_words(&mut self, words: &[String]) -> MaybeError<Vec<Text>> {
         self.reset();
-        let mut current_len = 0;
-        let mut max_word_len = 0;
-        let mut line = Vec::new();
-        let mut lines = Vec::new();
         let (terminal_width, terminal_height) = terminal_size()?;
-        // 40% of terminal width
         let max_width = terminal_width * 2 / 5;
-        const MAX_WORDS_PER_LINE: usize = 10;
-        // eprintln!("max width is {}", max_width);
 
-        for word in words {
-            max_word_len = std::cmp::max(max_word_len, word.len() + 1);
-            let new_len = current_len + word.len() as u16 + 1;
-            if line.len() < MAX_WORDS_PER_LINE && new_len <= max_width {
-                // add to line
-                line.push(word.clone());
-                current_len += word.len() as u16 + 1
-            } else {
-                // add an extra space at the end of each line because
-                //  user will instinctively type a space after every word
-                //  (at least I did)
-                lines.push(Text::from(line.join(" ") + " ").with_faint());
+        let wrapped = wrap_words(words, max_width, MAX_WORDS_PER_LINE);
+        let max_word_len = std::cmp::max(
+            words.iter().map(|w| w.len() + 1).max().unwrap_or(0) + 1,
+            MIN_LINE_WIDTH,
+        );
 
-                // clear line
-                line = vec![word.clone()];
-                current_len = word.len() as u16 + 1;
-            }
-        }
+        let lines: Vec<Text> = wrapped
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let joined = line.join(" ");
+                if i + 1 == wrapped.len() {
+                    Text::from(joined).with_faint()
+                } else {
+                    Text::from(joined + " ").with_faint()
+                }
+            })
+            .collect();
 
-        // last line wasn't added in loop
-        // last line doesn't have an extra space at the end
-        //   - the typing test stops as soon as the user types last char
-        //   - won't hang there waiting for user to type space
-        lines.push(Text::from(line.join(" ")).with_faint());
-
-        max_word_len = std::cmp::max(max_word_len + 1, MIN_LINE_WIDTH);
         if lines.len() + self.bottom_lines_len + 2 > terminal_height as usize {
             return Err(ToipeError::from(format!(
                 "Terminal height is too short! Toipe requires at least {} lines, got {} lines",
@@ -427,6 +459,35 @@ impl ToipeTui {
         self.flush()?;
 
         Ok(lines)
+    }
+
+    pub fn write_row(&mut self, y: u16, text: &str) -> MaybeError {
+        write!(
+            self.stdout,
+            "{}{}{}",
+            cursor::Goto(1, y),
+            clear::CurrentLine,
+            text
+        )?;
+        self.flush()?;
+        Ok(())
+    }
+
+    pub fn jump_to_char(&mut self, index: usize) -> MaybeError {
+        let mut remaining = index;
+        let last = self.cursor_pos.lines.len().saturating_sub(1);
+        for (i, line) in self.cursor_pos.lines.iter().enumerate() {
+            let len = line.length as usize;
+            if i == last || remaining < len {
+                self.cursor_pos.cur_line = i;
+                self.cursor_pos.cur_char_in_line = remaining.min(len.saturating_sub(1)) as u16;
+                break;
+            }
+            remaining -= len;
+        }
+        let (x, y) = self.cursor_pos.cur_pos();
+        write!(self.stdout, "{}", cursor::Goto(x, y))?;
+        Ok(())
     }
 
     /// Displays a [`Text`].
@@ -520,5 +581,46 @@ impl Drop for ToipeTui {
         )
         .expect("Could not reset terminal while exiting");
         self.flush().expect("Could not flush stdout while exiting");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{take_words_for_lines, wrap_words};
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn wrap_obeys_width() {
+        let lines = wrap_words(&words(&["a", "b", "c", "d"]), 4, 10);
+        assert_eq!(
+            lines,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_respects_word_cap() {
+        let lines = wrap_words(&words(&["a", "b", "c", "d"]), 1000, 2);
+        assert_eq!(
+            lines,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn take_words_counts_lines() {
+        let ws = words(&["a", "b", "c", "d", "e"]);
+        assert_eq!(take_words_for_lines(&ws, 4, 10, 2), 4);
+        assert_eq!(take_words_for_lines(&ws, 4, 10, 1), 2);
+        assert_eq!(take_words_for_lines(&ws, 1000, 10, 3), 5);
     }
 }

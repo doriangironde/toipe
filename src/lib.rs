@@ -12,17 +12,20 @@
 
 pub mod config;
 pub mod results;
+pub mod stats;
 pub mod textgen;
 pub mod tui;
 pub mod wordlists;
 
-use std::io::StdinLock;
+use std::io::stdin;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use config::ToipeConfig;
 use results::ToipeResults;
-use termion::input::Keys;
+use termion::terminal_size;
 use termion::{color, event::Key, input::TermRead};
 use textgen::{PunctuatedWordSelector, RawWordSelector, WordSelector};
 use tui::{Text, ToipeTui};
@@ -33,10 +36,12 @@ use anyhow::{Context, Result};
 /// Typing test terminal UI and logic.
 pub struct Toipe {
     tui: ToipeTui,
-    text: Vec<Text>,
     words: Vec<String>,
     word_selector: Box<dyn WordSelector>,
     config: ToipeConfig,
+    rx: Rc<Receiver<Key>>,
+    window_start: usize,
+    window_size: usize,
 }
 
 /// Represents any error caught in Toipe.
@@ -68,7 +73,45 @@ impl std::fmt::Display for ToipeError {
 
 impl std::error::Error for ToipeError {}
 
-impl<'a> Toipe {
+fn word_offsets(words: &[String]) -> Vec<usize> {
+    let mut offs = Vec::with_capacity(words.len() + 1);
+    let mut acc = 0;
+    offs.push(0);
+    for w in words {
+        acc += w.len() + 1;
+        offs.push(acc);
+    }
+    offs
+}
+
+enum TestStatus {
+    NotDone,
+    Done,
+    Quit,
+    Restart,
+}
+
+impl TestStatus {
+    fn to_process_more_keys(&self) -> bool {
+        matches!(self, TestStatus::NotDone)
+    }
+
+    fn to_display_results(&self) -> bool {
+        matches!(self, TestStatus::Done)
+    }
+
+    fn to_restart(&self) -> bool {
+        matches!(self, TestStatus::Restart)
+    }
+}
+
+struct TestState {
+    input: Vec<char>,
+    num_errors: usize,
+    num_chars_typed: usize,
+}
+
+impl Toipe {
     /// Initializes a new typing test on the standard output.
     ///
     /// See [`ToipeConfig`] for configuration options.
@@ -112,12 +155,25 @@ impl<'a> Toipe {
             ))
         }
 
+        let tui = ToipeTui::new();
+        let (tx, rx) = mpsc::channel();
+        let rx = Rc::new(rx);
+        std::thread::spawn(move || {
+            for key in stdin().lock().keys().flatten() {
+                if tx.send(key).is_err() {
+                    break;
+                }
+            }
+        });
+
         let mut toipe = Toipe {
-            tui: ToipeTui::new(),
+            tui,
             words: Vec::new(),
-            text: Vec::new(),
             word_selector,
             config,
+            rx,
+            window_start: 0,
+            window_size: 0,
         };
 
         toipe.restart()?;
@@ -132,7 +188,11 @@ impl<'a> Toipe {
     pub fn restart(&mut self) -> Result<()> {
         self.tui.reset_screen()?;
 
-        self.words = self.word_selector.new_words(self.config.num_words)?;
+        let word_count = match self.config.time {
+            Some(t) => (t * 3).max(30) as usize,
+            None => self.config.num_words,
+        };
+        self.words = self.word_selector.new_words(word_count)?;
 
         self.tui.display_lines_bottom(&[&[
             Text::from("ctrl-r").with_color(color::Blue),
@@ -141,14 +201,155 @@ impl<'a> Toipe {
             Text::from(" to quit ").with_faint(),
         ]])?;
 
-        self.show_words()?;
+        self.window_start = 0;
+        self.window_size = match self.config.time {
+            Some(_) => {
+                let (width, height) = terminal_size()?;
+                let max_lines = height.saturating_sub(3).max(2) as usize;
+                let m = tui::take_words_for_lines(&self.words, width * 2 / 5, 10, max_lines);
+                m.max(1).min(self.words.len())
+            }
+            None => self.words.len(),
+        };
+
+        self.render_words(&[])?;
 
         Ok(())
     }
 
-    fn show_words(&mut self) -> Result<()> {
-        self.text = self.tui.display_words(&self.words)?;
+    fn render_words(&mut self, input: &[char]) -> Result<()> {
+        let end = (self.window_start + self.window_size).min(self.words.len());
+        let chunk = &self.words[self.window_start..end];
+        let off = word_offsets(&self.words)[self.window_start];
+        self.tui.display_words(chunk)?;
+        let flat: Vec<char> = chunk.join(" ").chars().collect();
+        let n = input.len().saturating_sub(off).min(flat.len());
+        for k in 0..n {
+            let c = flat[k];
+            let text = if input[off + k] == c {
+                Text::from(c).with_color(color::LightGreen)
+            } else {
+                Text::from(c).with_underline().with_color(color::Red)
+            };
+            self.tui.display_raw_text(&text)?;
+            self.tui.move_to_next_char()?;
+        }
+        self.tui.jump_to_char(n)?;
+        self.tui.flush()?;
         Ok(())
+    }
+
+    fn ensure_window(&mut self, input: &[char]) -> Result<()> {
+        if self.config.time.is_none() || self.words.is_empty() {
+            return Ok(());
+        }
+        let offs = word_offsets(&self.words);
+        let chunk_end_idx = (self.window_start + self.window_size).min(self.words.len());
+        let i = input.len();
+        if i >= offs[chunk_end_idx] && chunk_end_idx < self.words.len() {
+            self.window_start = chunk_end_idx;
+            self.render_words(input)?;
+        } else if i < offs[self.window_start] && self.window_start > 0 {
+            self.window_start = self.window_start.saturating_sub(self.window_size);
+            self.render_words(input)?;
+        }
+        Ok(())
+    }
+
+    fn show_live_stats(
+        &mut self,
+        input: &[char],
+        flat: &[char],
+        started_at: Instant,
+    ) -> Result<()> {
+        let typed = input.len();
+        let correct = input
+            .iter()
+            .zip(flat.iter())
+            .filter(|(a, b)| a == b)
+            .count();
+        let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
+        let wpm = correct as f64 / 5.0 / (elapsed / 60.0);
+        let acc = if typed > 0 {
+            correct as f64 / typed as f64
+        } else {
+            1.0
+        };
+        let mut s = format!(
+            "{:.0} wpm  {:.0}%  {}/{}",
+            wpm,
+            acc * 100.0,
+            typed,
+            flat.len()
+        );
+        if let Some(limit) = self.config.time {
+            let left = limit.saturating_sub(started_at.elapsed().as_secs());
+            s.push_str(&format!("  {}s left", left));
+        }
+        let (_, sizey) = terminal_size()?;
+        self.tui.write_row(sizey - 1, &s)?;
+        Ok(())
+    }
+
+    fn process_key(
+        &mut self,
+        key: Key,
+        state: &mut TestState,
+        flat: &[char],
+        total_chars: usize,
+        started_at: Instant,
+    ) -> Result<TestStatus> {
+        let input = &mut state.input;
+        match key {
+            Key::Ctrl('c') => {
+                return Ok(TestStatus::Quit);
+            }
+            Key::Ctrl('r') => {
+                return Ok(TestStatus::Restart);
+            }
+            Key::Ctrl('w') => {
+                // delete last word
+                while !matches!(input.last(), Some(' ') | None) {
+                    if input.pop().is_some() {
+                        self.tui
+                            .replace_text(Text::from(flat[input.len()]).with_faint())?;
+                    }
+                }
+            }
+            Key::Char(c) => {
+                state.num_chars_typed += 1;
+                input.push(c);
+
+                if input.len() >= total_chars {
+                    return Ok(TestStatus::Done);
+                }
+
+                if flat[input.len() - 1] == c {
+                    self.tui
+                        .display_raw_text(&Text::from(c).with_color(color::LightGreen))?;
+                    self.tui.move_to_next_char()?;
+                } else {
+                    self.tui.display_raw_text(
+                        &Text::from(flat[input.len() - 1])
+                            .with_underline()
+                            .with_color(color::Red),
+                    )?;
+                    self.tui.move_to_next_char()?;
+                    state.num_errors += 1;
+                }
+            }
+            Key::Backspace | Key::Ctrl('h') if input.pop().is_some() => {
+                self.tui
+                    .replace_text(Text::from(flat[input.len()]).with_faint())?;
+            }
+            _ => {}
+        }
+
+        self.ensure_window(&state.input)?;
+        self.show_live_stats(&state.input, flat, started_at)?;
+        self.tui.flush()?;
+
+        Ok(TestStatus::NotDone)
     }
 
     /// Start typing test by monitoring input keys.
@@ -158,119 +359,69 @@ impl<'a> Toipe {
     /// If the test completes successfully, returns a boolean indicating
     /// whether the user wants to do another test and the
     /// [`ToipeResults`] for this test.
-    pub fn test(&mut self, stdin: StdinLock<'a>) -> Result<(bool, ToipeResults)> {
-        let mut input = Vec::<char>::new();
-        let original_text = self
-            .text
-            .iter()
-            .fold(Vec::<char>::new(), |mut chars, text| {
-                chars.extend(text.text().chars());
-                chars
-            });
-        let mut num_errors = 0;
-        let mut num_chars_typed = 0;
+    pub fn test(&mut self) -> Result<(bool, ToipeResults)> {
+        let rx = Rc::clone(&self.rx);
+        let flat: Vec<char> = self.words.join(" ").chars().collect();
+        let total_chars = flat.len();
+        let mut state = TestState {
+            input: Vec::new(),
+            num_errors: 0,
+            num_chars_typed: 0,
+        };
 
-        enum TestStatus {
-            // last key press did not quit/restart - more keys to be entered
-            NotDone,
-            // last letter was typed
-            Done,
-            // user wants to quit test
-            Quit,
-            // user wants to restart test
-            Restart,
-        }
+        let first_key = rx.recv()?;
+        let started_at = Instant::now();
 
-        impl TestStatus {
-            fn to_process_more_keys(&self) -> bool {
-                matches!(self, TestStatus::NotDone)
-            }
+        let mut status = self.process_key(first_key, &mut state, &flat, total_chars, started_at)?;
 
-            fn to_display_results(&self) -> bool {
-                matches!(self, TestStatus::Done)
-            }
-
-            fn to_restart(&self) -> bool {
-                matches!(self, TestStatus::Restart)
-            }
-        }
-
-        let mut process_key = |key: Key| -> Result<TestStatus> {
-            match key {
-                Key::Ctrl('c') => {
-                    return Ok(TestStatus::Quit);
-                }
-                Key::Ctrl('r') => {
-                    return Ok(TestStatus::Restart);
-                }
-                Key::Ctrl('w') => {
-                    // delete last word
-                    while !matches!(input.last(), Some(' ') | None) {
-                        if input.pop().is_some() {
-                            self.tui.replace_text(
-                                Text::from(original_text[input.len()]).with_faint(),
-                            )?;
+        if status.to_process_more_keys() {
+            match self.config.time {
+                Some(t) => {
+                    let duration = Duration::from_secs(t);
+                    loop {
+                        match rx.try_recv() {
+                            Ok(key) => {
+                                status = self.process_key(
+                                    key,
+                                    &mut state,
+                                    &flat,
+                                    total_chars,
+                                    started_at,
+                                )?;
+                                if !status.to_process_more_keys() {
+                                    break;
+                                }
+                            }
+                            Err(TryRecvError::Empty) => {
+                                if started_at.elapsed() >= duration {
+                                    status = TestStatus::Done;
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                status = TestStatus::Quit;
+                                break;
+                            }
                         }
                     }
                 }
-                Key::Char(c) => {
-                    input.push(c);
-
-                    if input.len() >= original_text.len() {
-                        return Ok(TestStatus::Done);
+                None => {
+                    for key in rx.iter() {
+                        status =
+                            self.process_key(key, &mut state, &flat, total_chars, started_at)?;
+                        if !status.to_process_more_keys() {
+                            break;
+                        }
                     }
-
-                    num_chars_typed += 1;
-
-                    if original_text[input.len() - 1] == c {
-                        self.tui
-                            .display_raw_text(&Text::from(c).with_color(color::LightGreen))?;
-                        self.tui.move_to_next_char()?;
-                    } else {
-                        self.tui.display_raw_text(
-                            &Text::from(original_text[input.len() - 1])
-                                .with_underline()
-                                .with_color(color::Red),
-                        )?;
-                        self.tui.move_to_next_char()?;
-                        num_errors += 1;
-                    }
-                }
-                Key::Backspace | Key::Ctrl('h') if input.pop().is_some() => {
-                    self.tui
-                        .replace_text(Text::from(original_text[input.len()]).with_faint())?;
-                }
-                _ => {}
-            }
-
-            self.tui.flush()?;
-
-            Ok(TestStatus::NotDone)
-        };
-
-        let mut keys = stdin.keys();
-
-        // read first key
-        let key = keys.next().unwrap()?;
-        // start the timer
-        let started_at = Instant::now();
-        // process first key
-        let mut status = process_key(key)?;
-
-        if status.to_process_more_keys() {
-            for key in &mut keys {
-                status = process_key(key?)?;
-                if !status.to_process_more_keys() {
-                    break;
                 }
             }
         }
 
-        // stop the timer
         let ended_at = Instant::now();
 
         let (final_chars_typed_correctly, final_uncorrected_errors) =
-            input.iter().zip(original_text.iter()).fold(
+            state.input.iter().zip(flat.iter()).fold(
                 (0, 0),
                 |(total_chars_typed_correctly, total_uncorrected_errors),
                  (typed_char, orig_char)| {
@@ -284,9 +435,9 @@ impl<'a> Toipe {
 
         let results = ToipeResults {
             total_words: self.words.len(),
-            total_chars_typed: num_chars_typed,
-            total_chars_in_text: input.len(),
-            total_char_errors: num_errors,
+            total_chars_typed: state.num_chars_typed,
+            total_chars_in_text: state.input.len(),
+            total_char_errors: state.num_errors,
             final_chars_typed_correctly,
             final_uncorrected_errors,
             started_at,
@@ -294,7 +445,7 @@ impl<'a> Toipe {
         };
 
         let to_restart = if status.to_display_results() {
-            self.display_results(results.clone(), keys)?
+            self.display_results(results.clone(), &state.input, &rx)?
         } else {
             status.to_restart()
         };
@@ -305,34 +456,129 @@ impl<'a> Toipe {
     fn display_results(
         &mut self,
         results: ToipeResults,
-        mut keys: Keys<StdinLock>,
+        input: &[char],
+        rx: &Receiver<Key>,
     ) -> Result<bool> {
         self.tui.reset_screen()?;
 
-        self.tui.display_lines::<&[Text], _>(
-            &[
-                &[Text::from(format!(
-                    "Took {}s for {} words of {}",
-                    results.duration().as_secs(),
-                    results.total_words,
-                    self.config.text_name(),
-                ))],
-                &[
-                    Text::from(format!("Accuracy: {:.1}%", results.accuracy() * 100.0))
-                        .with_color(color::Blue),
-                ],
-                &[Text::from(format!(
-                    "Mistakes: {} out of {} characters",
-                    results.total_char_errors, results.total_chars_in_text
-                ))],
-                &[
-                    Text::from("Speed: "),
-                    Text::from(format!("{:.1} wpm", results.wpm())).with_color(color::Green),
-                    Text::from(" (words per minute)"),
-                ],
+        let records = stats::load();
+        let best = stats::best_wpm(&records);
+        let is_pb = best.is_none_or(|b| results.wpm() > b + 1e-9);
+
+        let headline = match self.config.time {
+            Some(t) => format!(
+                "Took {}s of a {}s test ({})",
+                results.duration().as_secs(),
+                t,
+                self.config.text_name()
+            ),
+            None => format!(
+                "Took {}s for {} words of {}",
+                results.duration().as_secs(),
+                results.total_words,
+                self.config.text_name()
+            ),
+        };
+
+        let mut lines: Vec<Vec<Text>> = vec![
+            vec![Text::from(headline)],
+            vec![
+                Text::from(format!("Accuracy: {:.1}%", results.accuracy() * 100.0))
+                    .with_color(color::Blue),
             ],
-            false,
-        )?;
+            vec![Text::from(format!(
+                "Mistakes: {} out of {} characters",
+                results.total_char_errors, results.total_chars_in_text
+            ))],
+            vec![
+                Text::from("Speed: "),
+                Text::from(format!("{:.1} wpm", results.wpm())).with_color(color::Green),
+                Text::from(" (words per minute)"),
+            ],
+            vec![Text::from(format!("Raw: {:.1} wpm", results.raw_wpm()))],
+        ];
+
+        match (best, is_pb) {
+            (_, true) => lines.push(vec![Text::from(format!(
+                "New personal best: {:.1} wpm",
+                results.wpm()
+            ))
+            .with_color(color::Green)]),
+            (Some(b), false) => lines.push(vec![Text::from(format!("Best: {:.1} wpm", b))]),
+            (None, false) => {}
+        }
+
+        let record = stats::TestRecord {
+            ts: stats::now_ts(),
+            wpm: results.wpm(),
+            accuracy: results.accuracy(),
+            duration_ms: results.duration().as_millis() as u64,
+            words: results.total_words,
+            chars: results.total_chars_in_text,
+            errors: results.total_char_errors,
+            punct: self.config.punctuation,
+        };
+        let _ = stats::append_record(&record);
+
+        let offs = word_offsets(&self.words);
+        let end = (self.window_start + self.window_size).min(self.words.len());
+        let chunk = &self.words[self.window_start..end];
+        let off = offs[self.window_start];
+
+        let (width, height) = terminal_size()?;
+        let max_width = width * 2 / 5;
+        let heatmap_words = &chunk[..tui::take_words_for_lines(
+            chunk,
+            max_width,
+            10,
+            height.saturating_sub(8).max(2) as usize,
+        )];
+        let flat: Vec<char> = heatmap_words.join(" ").chars().collect();
+
+        let mut idx = 0;
+        let mut heatmap: Vec<Vec<Text>> = Vec::new();
+        for line in tui::wrap_words(heatmap_words, max_width, 10) {
+            let mut texts = Vec::new();
+            for w in line {
+                for c in w.chars() {
+                    let g = off + idx;
+                    let t = if g < input.len() {
+                        if input[g] == c {
+                            Text::from(c).with_color(color::LightGreen)
+                        } else {
+                            Text::from(c).with_underline().with_color(color::Red)
+                        }
+                    } else {
+                        Text::from(c).with_faint()
+                    };
+                    texts.push(t);
+                    idx += 1;
+                }
+                if idx < flat.len() {
+                    let g = off + idx;
+                    let t = if g < input.len() {
+                        if input[g] == ' ' {
+                            Text::from(' ').with_color(color::LightGreen)
+                        } else {
+                            Text::from(' ').with_underline().with_color(color::Red)
+                        }
+                    } else {
+                        Text::from(' ').with_faint()
+                    };
+                    texts.push(t);
+                    idx += 1;
+                }
+            }
+            heatmap.push(texts);
+        }
+
+        let slice_refs: Vec<&[Text]> = lines
+            .iter()
+            .chain(heatmap.iter())
+            .map(|l| l.as_slice())
+            .collect();
+        self.tui.display_lines::<&[Text], _>(&slice_refs, false)?;
+
         self.tui.display_lines_bottom(&[&[
             Text::from("ctrl-r").with_color(color::Blue),
             Text::from(" to restart, ").with_faint(),
@@ -342,21 +588,36 @@ impl<'a> Toipe {
         // no cursor on results page
         self.tui.hide_cursor()?;
 
-        // TODO: make this a bit more general
-        // perhaps use a `known_keys_pressed` flag?
         let mut to_restart: Option<bool> = None;
         while to_restart.is_none() {
-            match keys.next().unwrap()? {
+            match rx.recv() {
                 // press ctrl + 'r' to restart
-                Key::Ctrl('r') => to_restart = Some(true),
+                Ok(Key::Ctrl('r')) => to_restart = Some(true),
                 // press ctrl + 'c' to quit
-                Key::Ctrl('c') => to_restart = Some(false),
-                _ => {}
+                Ok(Key::Ctrl('c')) => to_restart = Some(false),
+                Ok(_) => {}
+                Err(_) => to_restart = Some(false),
             }
         }
 
         self.tui.show_cursor()?;
 
         Ok(to_restart.unwrap_or(false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_offsets;
+
+    #[test]
+    fn offsets() {
+        let words = vec!["ab".to_string(), "c".to_string(), "def".to_string()];
+        let offs = word_offsets(&words);
+        assert_eq!(offs, vec![0, 3, 5, 9]);
+        let flat: Vec<char> = words.join(" ").chars().collect();
+        assert_eq!(flat.len(), 8);
+        assert_eq!(flat[offs[1]], 'c');
+        assert_eq!(flat[offs[2]], 'd');
     }
 }

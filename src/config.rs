@@ -33,6 +33,12 @@ pub struct ToipeConfig {
     /// Whether to include punctuation
     #[clap(short, long)]
     pub punctuation: bool,
+    /// Time in seconds for a timed test
+    #[clap(short = 't', long)]
+    pub time: Option<u64>,
+    /// Show typing statistics and exit
+    #[clap(long)]
+    pub stats: bool,
 }
 
 impl ToipeConfig {

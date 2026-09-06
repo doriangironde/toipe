@@ -55,6 +55,10 @@ impl ToipeResults {
             .max(0.0)
             / (self.duration().as_secs_f64() / 60.0)
     }
+
+    pub fn raw_wpm(&self) -> f64 {
+        self.total_chars_typed as f64 / 5.0 / (self.duration().as_secs_f64() / 60.0)
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +205,30 @@ mod tests {
             max_ulps = max_ulps
         );
         // we don't consider the case of duration = 0 because that seems impossible
+    }
+
+    #[test]
+    fn raw_wpm() {
+        fn get(total_chars_typed: usize, duration: f64) -> ToipeResults {
+            let started_at = Instant::now();
+            let seconds = duration.round();
+            let nanoseconds = (duration - seconds) * 1_000_000_000.0;
+            let ended_at = started_at + Duration::new(seconds as u64, nanoseconds as u32);
+            ToipeResults {
+                total_words: 0,
+                total_chars_typed,
+                total_chars_in_text: 0,
+                total_char_errors: 0,
+                final_chars_typed_correctly: 0,
+                final_uncorrected_errors: 0,
+                started_at,
+                ended_at,
+            }
+        }
+
+        let max_ulps = 1;
+        assert_ulps_eq!(get(100, 60.0).raw_wpm(), 20.0, max_ulps = max_ulps);
+        assert_ulps_eq!(get(250, 60.0).raw_wpm(), 50.0, max_ulps = max_ulps);
+        assert_ulps_eq!(get(0, 60.0).raw_wpm(), 0.0, max_ulps = max_ulps);
     }
 }
